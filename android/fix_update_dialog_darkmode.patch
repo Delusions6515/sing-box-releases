@@ -1,0 +1,12 @@
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/component/UpdateDialog.kt b/app/src/main/java/io/nekohasekai/sfa/compose/component/UpdateDialog.kt
+index ff18d53..c018463 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/component/UpdateDialog.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/component/UpdateDialog.kt
+@@ -46,6 +46,7 @@ fun UpdateAvailableDialog(updateInfo: UpdateInfo, onDismiss: () -> Unit, onUpdat
+                 if (!updateInfo.releaseNotes.isNullOrBlank()) {
+                     val processedNotes = remember(updateInfo.releaseNotes) {
+                         emojiCatalog.replaceShortcodes(updateInfo.releaseNotes)
++                            .replace("`", "")
+                     }
+                     Spacer(modifier = Modifier.height(12.dp))
+                     MarkdownText(
