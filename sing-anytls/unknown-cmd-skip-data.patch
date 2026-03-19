@@ -1,0 +1,20 @@
+--- a/session/session.go	2026-03-16 04:27:29.437345473 +0000
++++ b/session/session.go	2026-03-16 04:27:29.570359288 +0000
+@@ -350,7 +350,16 @@
+ 					buf.Put(buffer)
+ 				}
+ 			default:
+-				// I don't know what command it is (can't have data)
++				// Unknown command — skip any associated data to maintain
++				// frame alignment (forward compatibility & probe resilience)
++				if hdr.Length() > 0 {
++					buffer := buf.Get(int(hdr.Length()))
++					if _, err := io.ReadFull(s.conn, buffer); err != nil {
++						buf.Put(buffer)
++						return err
++					}
++					buf.Put(buffer)
++				}
+ 			}
+ 		} else {
+ 			return err
