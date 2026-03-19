@@ -1,0 +1,25 @@
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index 1761e65..a1b2c3d 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -87,6 +87,12 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+                     PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                             serviceUpdateIdleMode()
++                        }
++                    }
++
++                    Intent.ACTION_SCREEN_ON -> {
++                        if (status.value == Status.Started && ::commandServer.isInitialized) {
++                            commandServer.resetNetwork()
+                         }
+                     }
+                 }
+@@ -338,6 +344,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                         addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+                     }
++                    addAction(Intent.ACTION_SCREEN_ON)
+                 },
+                 ContextCompat.RECEIVER_NOT_EXPORTED,
+             )
