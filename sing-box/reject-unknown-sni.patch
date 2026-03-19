@@ -1,0 +1,81 @@
+diff -ruN '--exclude=README.md' '--exclude=.git*' a/common/tls/std_server.go b/common/tls/std_server.go
+--- a/common/tls/std_server.go	2026-02-27 11:55:32.000000000 +0000
++++ b/common/tls/std_server.go	2026-02-28 06:06:49.625317102 +0000
+@@ -34,6 +34,8 @@
+ 	clientCertificatePath []string
+ 	echKeyPath            string
+ 	watcher               *fswatch.Watcher
++	rejectUnknownSNI      bool
++	serverNames           map[string]bool
+ }
+ 
+ func (c *STDServerConfig) ServerName() string {
+@@ -216,6 +218,9 @@
+ 	if !options.Enabled {
+ 		return nil, nil
+ 	}
++	if options.ServerName != "" && len(options.ServerNames) > 0 {
++		return nil, E.New("server_name and server_names cannot be configured at the same time")
++	}
+ 	var tlsConfig *tls.Config
+ 	var acmeService adapter.SimpleLifecycle
+ 	var err error
+@@ -357,6 +362,15 @@
+ 			return nil, err
+ 		}
+ 	}
++	serverNames := make(map[string]bool)
++	if options.ServerName != "" {
++		serverNames[options.ServerName] = true
++	}
++	for _, name := range options.ServerNames {
++		if name != "" {
++			serverNames[name] = true
++		}
++	}
+ 	serverConfig := &STDServerConfig{
+ 		config:                tlsConfig,
+ 		logger:                logger,
+@@ -367,10 +381,22 @@
+ 		clientCertificatePath: options.ClientCertificatePath,
+ 		keyPath:               options.KeyPath,
+ 		echKeyPath:            echKeyPath,
++		rejectUnknownSNI:      options.RejectUnknownSNI,
++		serverNames:           serverNames,
+ 	}
+ 	serverConfig.config.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+ 		serverConfig.access.Lock()
+ 		defer serverConfig.access.Unlock()
++		if serverConfig.rejectUnknownSNI {
++			sni := info.ServerName
++			if len(serverConfig.serverNames) > 0 {
++				if sni == "" || !serverConfig.serverNames[sni] {
++					return nil, E.New("unknown or missing server name")
++				}
++			} else if sni != "" {
++				return nil, E.New("unknown server name: no server names configured")
++			}
++		}
+ 		return serverConfig.config, nil
+ 	}
+ 	var config ServerConfig = serverConfig
+diff -ruN '--exclude=README.md' '--exclude=.git*' a/option/tls.go b/option/tls.go
+--- a/option/tls.go	2026-02-27 11:55:32.000000000 +0000
++++ b/option/tls.go	2026-02-28 06:06:06.075315970 +0000
+@@ -12,6 +12,7 @@
+ type InboundTLSOptions struct {
+ 	Enabled                          bool                                `json:"enabled,omitempty"`
+ 	ServerName                       string                              `json:"server_name,omitempty"`
++	ServerNames                      badoption.Listable[string]          `json:"server_names,omitempty"`
+ 	Insecure                         bool                                `json:"insecure,omitempty"`
+ 	ALPN                             badoption.Listable[string]          `json:"alpn,omitempty"`
+ 	MinVersion                       string                              `json:"min_version,omitempty"`
+@@ -31,6 +32,8 @@
+ 	ACME                             *InboundACMEOptions                 `json:"acme,omitempty"`
+ 	ECH                              *InboundECHOptions                  `json:"ech,omitempty"`
+ 	Reality                          *InboundRealityOptions              `json:"reality,omitempty"`
++
++	RejectUnknownSNI bool `json:"reject_unknown_sni,omitempty"`
+ }
+ 
+ type ClientAuthType tls.ClientAuthType
