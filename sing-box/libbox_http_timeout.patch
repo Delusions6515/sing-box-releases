@@ -1,0 +1,14 @@
+diff --git a/experimental/libbox/http.go b/experimental/libbox/http.go
+index 9f4b291..a7c3e01 100644
+--- a/experimental/libbox/http.go
++++ b/experimental/libbox/http.go
+@@ -70,7 +70,9 @@ func NewHTTPClient() HTTPClient {
+ 	client := new(httpClient)
+ 	client.client.Transport = &client.transport
+ 	client.transport.ForceAttemptHTTP2 = true
++	client.transport.DialContext = (&net.Dialer{Timeout: C.TCPTimeout}).DialContext
+ 	client.transport.TLSHandshakeTimeout = C.TCPTimeout
++	client.transport.ResponseHeaderTimeout = C.TCPTimeout
+ 	client.transport.TLSClientConfig = &client.tls
+ 	client.transport.DisableKeepAlives = true
+ 	return client
