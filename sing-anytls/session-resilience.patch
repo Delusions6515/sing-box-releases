@@ -1,0 +1,157 @@
+diff --git a/client.go b/client.go
+index 74ab42d..aa04bc1 100644
+--- a/client.go
++++ b/client.go
+@@ -85,6 +85,10 @@ func (c *Client) createOutboundConnection(ctx context.Context) (net.Conn, error)
+ 	return conn, nil
+ }
+ 
++func (h *Client) Reset() {
++	h.sessionClient.Reset()
++}
++
+ func (h *Client) Close() error {
+ 	return h.sessionClient.Close()
+ }
+diff --git a/session/client.go b/session/client.go
+index a6d37c8..85f6d3b 100644
+--- a/session/client.go
++++ b/session/client.go
+@@ -71,6 +71,43 @@ func NewClient(ctx context.Context, logger logger.Logger, dialOut util.DialOutFu
+ 	return c
+ }
+ 
++// Reset closes all existing sessions (both idle and active) without
++// cancelling the client context, so new sessions can still be created.
++// This is called on network interface changes to clean up stale connections.
++func (c *Client) Reset() {
++	select {
++	case <-c.die.Done():
++		return
++	default:
++	}
++
++	// Drain idle session pool
++	c.idleSessionLock.Lock()
++	var idleSessions []*Session
++	it := c.idleSession.Iterate()
++	for it.IsNotEnd() {
++		idleSessions = append(idleSessions, it.Value())
++		it.MoveToNext()
++	}
++	c.idleSession.Clear()
++	c.idleSessionLock.Unlock()
++
++	// Snapshot active sessions
++	c.sessionsLock.Lock()
++	activeSessions := make([]*Session, 0, len(c.sessions))
++	for _, session := range c.sessions {
++		activeSessions = append(activeSessions, session)
++	}
++	c.sessionsLock.Unlock()
++
++	for _, session := range idleSessions {
++		session.Close()
++	}
++	for _, session := range activeSessions {
++		session.Close()
++	}
++}
++
+ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
+ 	select {
+ 	case <-c.die.Done():
+@@ -82,22 +119,30 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
+ 	var stream *Stream
+ 	var err error
+ 
+-	session = c.getIdleSession()
+-	if session == nil {
+-		session, err = c.createSession(ctx)
++	if idle := c.getIdleSession(); idle != nil {
++		stream, err = idle.OpenStream()
++		if err != nil {
++			idle.Close()
++		} else {
++			session = idle
++		}
+ 	}
++
+ 	if session == nil {
+-		return nil, fmt.Errorf("failed to create session: %w", err)
+-	}
+-	stream, err = session.OpenStream()
+-	if err != nil {
+-		session.Close()
+-		return nil, fmt.Errorf("failed to create stream: %w", err)
++		session, err = c.createSession(ctx)
++		if session == nil {
++			return nil, fmt.Errorf("failed to create session: %w", err)
++		}
++		stream, err = session.OpenStream()
++		if err != nil {
++			session.Close()
++			return nil, fmt.Errorf("failed to create stream: %w", err)
++		}
+ 	}
+ 
+ 	stream.dieHook = func() {
+ 		// If Session is not closed, put this Stream to pool
+-		if !session.IsClosed() {
++		if !session.IsClosed() && !session.connBroken.Load() {
+ 			select {
+ 			case <-c.die.Done():
+ 				// Now client has been closed
+@@ -116,10 +161,18 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
+ 
+ func (c *Client) getIdleSession() (idle *Session) {
+ 	c.idleSessionLock.Lock()
+-	if !c.idleSession.IsEmpty() {
++	for !c.idleSession.IsEmpty() {
+ 		it := c.idleSession.Iterate()
+-		idle = it.Value()
++		s := it.Value()
+ 		c.idleSession.Remove(it.Key())
++		if s.IsClosed() || s.connBroken.Load() {
++			if s.connBroken.Load() && !s.IsClosed() {
++				go s.Close()
++			}
++			continue
++		}
++		idle = s
++		break
+ 	}
+ 	c.idleSessionLock.Unlock()
+ 	return
+@@ -184,6 +237,14 @@ func (c *Client) idleCleanupExpTime(expTime time.Time) {
+ 		key := it.Key()
+ 		it.MoveToNext()
+ 
++		if session.IsClosed() || session.connBroken.Load() {
++			c.idleSession.Remove(key)
++			if session.connBroken.Load() && !session.IsClosed() {
++				sessionToClose = append(sessionToClose, session)
++			}
++			continue
++		}
++
+ 		if !session.idleSince.Before(expTime) {
+ 			activeCount++
+ 			continue
+diff --git a/session/session.go b/session/session.go
+index 893cc72..c0ff9be 100644
+--- a/session/session.go
++++ b/session/session.go
+@@ -33,6 +33,12 @@ type Session struct {
+ 	synDone     func()
+ 	synDoneLock sync.Mutex
+ 
++	// connBroken is set when a write to the underlying conn fails.
++	// A broken session will not be reused for new streams and will be
++	// cleaned up by idleLoop, giving concurrent streams time to finish
++	// reading in-flight responses instead of being killed by s.Close().
++	connBroken atomic.Bool
++
+ 	// pool
+ 	seq       uint64
+ 	idleSince time.Time
