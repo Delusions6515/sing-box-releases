@@ -1,0 +1,22 @@
+--- a/protocol/anytls/outbound.go
++++ b/protocol/anytls/outbound.go
+@@ -25,6 +25,8 @@
+ 	outbound.Register[option.AnyTLSOutboundOptions](registry, C.TypeAnyTLS, NewOutbound)
+ }
+ 
++var _ adapter.InterfaceUpdateListener = (*Outbound)(nil)
++
+ type Outbound struct {
+ 	outbound.Adapter
+ 	dialer    tls.Dialer
+@@ -126,6 +128,10 @@
+ 	return h.uotClient.ListenPacket(ctx, destination)
+ }
+ 
++func (h *Outbound) InterfaceUpdated() {
++	h.client.Reset()
++}
++
+ func (h *Outbound) Close() error {
+ 	return common.Close(h.client)
+ }
