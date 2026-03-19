@@ -1,0 +1,27 @@
+diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
+index 15f8ba7..502da07 100644
+--- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
++++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
+@@ -34,7 +34,7 @@ class GitHubUpdateChecker : Closeable {
+                 continue
+             }
+             val metadata = runCatching { downloadMetadata(release) }.getOrNull() ?: continue
+-            if (!isNewerThanCurrent(metadata.versionName)) {
++            if (!isNewerThanCurrent(metadata.versionName, metadata.versionCode)) {
+                 continue
+             }
+             val currentBest = selected
+@@ -86,7 +86,12 @@ class GitHubUpdateChecker : Closeable {
+         }
+     }
+ 
+-    private fun isNewerThanCurrent(versionName: String): Boolean = Libbox.compareSemver(versionName, BuildConfig.VERSION_NAME)
++    private fun isNewerThanCurrent(versionName: String, versionCode: Int): Boolean {
++        if (versionCode != BuildConfig.VERSION_CODE) {
++            return versionCode > BuildConfig.VERSION_CODE
++        }
++        return Libbox.compareSemver(versionName, BuildConfig.VERSION_NAME)
++    }
+ 
+     private fun isBetterVersion(version: VersionMetadata, other: VersionMetadata): Boolean {
+         if (Libbox.compareSemver(version.versionName, other.versionName)) {
