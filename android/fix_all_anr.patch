@@ -1,0 +1,485 @@
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index 1761e65..be9c321 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -50,12 +50,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+         private const val TAG = "BoxService"
+ 
+         fun start() {
+-            val intent =
+-                runBlocking {
+-                    withContext(Dispatchers.IO) {
+-                        Intent(Application.application, Settings.serviceClass())
+-                    }
+-                }
++            val intent = Intent(Application.application, Settings.serviceClass())
+             ContextCompat.startForegroundService(Application.application, intent)
+         }
+ 
+@@ -327,7 +322,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+     @OptIn(DelicateCoroutinesApi::class)
+     @Suppress("SameReturnValue")
+     internal fun onStartCommand(): Int {
+-        if (status.value != Status.Stopped) return Service.START_NOT_STICKY
++        if (status.value != Status.Stopped) return Service.START_STICKY
+         status.value = Status.Starting
+ 
+         if (!receiverRegistered) {
+@@ -355,7 +350,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+             }
+             startService()
+         }
+-        return Service.START_NOT_STICKY
++        return Service.START_STICKY
+     }
+ 
+     internal fun onBind(): IBinder = binder
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+index 3c02e04..6889328 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+@@ -4,6 +4,11 @@ import android.net.Network
+ import android.os.Build
+ import io.nekohasekai.libbox.InterfaceUpdateListener
+ import io.nekohasekai.sfa.Application
++import kotlinx.coroutines.DelicateCoroutinesApi
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.GlobalScope
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
+ import java.net.NetworkInterface
+ 
+ object DefaultNetworkMonitor {
+@@ -14,7 +19,7 @@ object DefaultNetworkMonitor {
+     suspend fun start() {
+         DefaultNetworkListener.start(this) {
+             defaultNetwork = it
+-            checkDefaultInterfaceUpdate(it)
++            notifyInterfaceUpdateAsync(it)
+         }
+         defaultNetwork = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+             Application.connectivity.activeNetwork
+@@ -37,26 +42,59 @@ object DefaultNetworkMonitor {
+ 
+     fun setListener(listener: InterfaceUpdateListener?) {
+         this.listener = listener
+-        checkDefaultInterfaceUpdate(defaultNetwork)
++        notifyInterfaceUpdateSync(defaultNetwork)
+     }
+ 
+-    private fun checkDefaultInterfaceUpdate(newNetwork: Network?) {
++    private fun notifyInterfaceUpdateSync(newNetwork: Network?) {
+         val listener = listener ?: return
+         if (newNetwork != null) {
+             val interfaceName =
+-                (Application.connectivity.getLinkProperties(newNetwork) ?: return).interfaceName
++                (Application.connectivity.getLinkProperties(newNetwork)
++                    ?: return).interfaceName
+             for (times in 0 until 10) {
+                 var interfaceIndex: Int
+                 try {
+-                    interfaceIndex = NetworkInterface.getByName(interfaceName).index
++                    interfaceIndex =
++                        NetworkInterface.getByName(interfaceName).index
+                 } catch (e: Exception) {
+                     Thread.sleep(100)
+                     continue
+                 }
+-                listener.updateDefaultInterface(interfaceName, interfaceIndex, false, false)
++                listener.updateDefaultInterface(
++                    interfaceName, interfaceIndex, false, false
++                )
++                break
+             }
+         } else {
+             listener.updateDefaultInterface("", -1, false, false)
+         }
+     }
++
++    @OptIn(DelicateCoroutinesApi::class)
++    private fun notifyInterfaceUpdateAsync(newNetwork: Network?) {
++        val listener = listener ?: return
++        GlobalScope.launch(Dispatchers.IO) {
++            if (newNetwork != null) {
++                val interfaceName =
++                    (Application.connectivity.getLinkProperties(newNetwork)
++                        ?: return@launch).interfaceName
++                for (times in 0 until 10) {
++                    var interfaceIndex: Int
++                    try {
++                        interfaceIndex =
++                            NetworkInterface.getByName(interfaceName).index
++                    } catch (e: Exception) {
++                        delay(100)
++                        continue
++                    }
++                    listener.updateDefaultInterface(
++                        interfaceName, interfaceIndex, false, false
++                    )
++                    break
++                }
++            } else {
++                listener.updateDefaultInterface("", -1, false, false)
++            }
++        }
++    }
+ }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/ServiceConnection.kt b/app/src/main/java/io/nekohasekai/sfa/bg/ServiceConnection.kt
+index d6c76c9..a6c8a78 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/ServiceConnection.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/ServiceConnection.kt
+@@ -14,9 +14,6 @@ import io.nekohasekai.sfa.constant.Action
+ import io.nekohasekai.sfa.constant.Alert
+ import io.nekohasekai.sfa.constant.Status
+ import io.nekohasekai.sfa.database.Settings
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.runBlocking
+-import kotlinx.coroutines.withContext
+ 
+ class ServiceConnection(private val context: Context, callback: Callback, private val register: Boolean = true) : ServiceConnection {
+     companion object {
+@@ -29,12 +26,7 @@ class ServiceConnection(private val context: Context, callback: Callback, privat
+     val status get() = service?.status?.let { Status.values()[it] } ?: Status.Stopped
+ 
+     fun connect() {
+-        val intent =
+-            runBlocking {
+-                withContext(Dispatchers.IO) {
+-                    Intent(context, Settings.serviceClass()).setAction(Action.SERVICE)
+-                }
+-            }
++        val intent = Intent(context, Settings.serviceClass()).setAction(Action.SERVICE)
+         context.bindService(intent, this, AppCompatActivity.BIND_AUTO_CREATE)
+         Log.d(TAG, "request connect")
+     }
+@@ -52,12 +44,7 @@ class ServiceConnection(private val context: Context, callback: Callback, privat
+             context.unbindService(this)
+         } catch (_: IllegalArgumentException) {
+         }
+-        val intent =
+-            runBlocking {
+-                withContext(Dispatchers.IO) {
+-                    Intent(context, Settings.serviceClass()).setAction(Action.SERVICE)
+-                }
+-            }
++        val intent = Intent(context, Settings.serviceClass()).setAction(Action.SERVICE)
+         context.bindService(intent, this, AppCompatActivity.BIND_AUTO_CREATE)
+         Log.d(TAG, "request reconnect")
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/VPNService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/VPNService.kt
+index d958184..d669125 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/VPNService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/VPNService.kt
+@@ -12,9 +12,6 @@ import io.nekohasekai.libbox.TunOptions
+ import io.nekohasekai.sfa.database.Settings
+ import io.nekohasekai.sfa.ktx.toIpPrefix
+ import io.nekohasekai.sfa.ktx.toList
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.runBlocking
+-import kotlinx.coroutines.withContext
+ 
+ class VPNService :
+     VpnService(),
+@@ -40,11 +37,7 @@ class VPNService :
+     }
+ 
+     override fun onRevoke() {
+-        runBlocking {
+-            withContext(Dispatchers.Main) {
+-                service.onRevoke()
+-            }
+-        }
++        service.onRevoke()
+     }
+ 
+     override fun autoDetectInterfaceControl(fd: Int) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/connections/ConnectionsViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/connections/ConnectionsViewModel.kt
+index c54087c..3dfb704 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/connections/ConnectionsViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/connections/ConnectionsViewModel.kt
+@@ -13,7 +13,9 @@ import io.nekohasekai.sfa.constant.Status
+ import io.nekohasekai.sfa.ktx.toList
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.CommandClient
++import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.flow.combine
+@@ -80,9 +82,13 @@ class ConnectionsViewModel :
+                     state.visibleCount > 0 && state.status == Status.Started
+                 if (shouldConnect) {
+                     updateState { copy(isLoading = true) }
+-                    commandClient.connect()
+-                } else {
+-                    commandClient.disconnect()
++                }
++                withContext(Dispatchers.IO) {
++                    if (shouldConnect) {
++                        commandClient.connect()
++                    } else {
++                        commandClient.disconnect()
++                    }
+                 }
+             }
+         }
+@@ -92,9 +98,12 @@ class ConnectionsViewModel :
+         _visibleCount.value += if (visible) 1 else -1
+     }
+ 
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCleared() {
+         super.onCleared()
+-        commandClient.disconnect()
++        GlobalScope.launch(Dispatchers.IO) {
++            commandClient.disconnect()
++        }
+     }
+ 
+     private suspend fun handleServiceStatusChange(status: Status) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardViewModel.kt
+index 943eca0..ed59535 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/DashboardViewModel.kt
+@@ -16,6 +16,8 @@ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.CommandClient
+ import io.nekohasekai.sfa.utils.HTTPClient
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.DelicateCoroutinesApi
++import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+@@ -125,6 +127,7 @@ class DashboardViewModel :
+     CommandClient.Handler {
+     private val _serviceStatus = MutableStateFlow(Status.Stopped)
+     val serviceStatus: StateFlow<Status> = _serviceStatus.asStateFlow()
++    private var pendingToggle = false
+ 
+     internal val commandClient =
+         CommandClient(
+@@ -158,19 +161,24 @@ class DashboardViewModel :
+         viewModelScope.launch {
+             AppLifecycleObserver.isForeground.collect { foreground ->
+                 if (_serviceStatus.value != Status.Started) return@collect
+-                if (foreground) {
+-                    commandClient.connect()
+-                } else {
+-                    commandClient.disconnect()
++                withContext(Dispatchers.IO) {
++                    if (foreground) {
++                        commandClient.connect()
++                    } else {
++                        commandClient.disconnect()
++                    }
+                 }
+             }
+         }
+     }
+ 
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCleared() {
+         super.onCleared()
+         ProfileManager.unregisterCallback(::onProfilesChanged)
+-        commandClient.disconnect()
++        GlobalScope.launch(Dispatchers.IO) {
++            commandClient.disconnect()
++        }
+     }
+ 
+     private fun onProfilesChanged() {
+@@ -235,9 +243,17 @@ class DashboardViewModel :
+ 
+     fun toggleService() {
+         when (currentState.serviceStatus) {
+-            Status.Starting, Status.Started -> stopService()
+-            Status.Stopped -> sendGlobalEvent(UiEvent.RequestStartService)
+-            else -> { /* Ignore while transitioning */ }
++            Status.Started -> {
++                pendingToggle = false
++                stopService()
++            }
++            Status.Stopped -> {
++                pendingToggle = false
++                sendGlobalEvent(UiEvent.RequestStartService)
++            }
++            Status.Starting, Status.Stopping -> {
++                pendingToggle = !pendingToggle
++            }
+         }
+     }
+ 
+@@ -445,6 +461,19 @@ class DashboardViewModel :
+                 )
+             }
+             handleServiceStatusChange(status)
++            if (pendingToggle) {
++                when (status) {
++                    Status.Started -> {
++                        pendingToggle = false
++                        stopService()
++                    }
++                    Status.Stopped -> {
++                        pendingToggle = false
++                        sendGlobalEvent(UiEvent.RequestStartService)
++                    }
++                    else -> {}
++                }
++            }
+         }
+     }
+ 
+@@ -453,14 +482,18 @@ class DashboardViewModel :
+             Status.Started -> {
+                 checkDeprecatedNotes()
+                 if (AppLifecycleObserver.isForeground.value) {
+-                    commandClient.connect()
++                    viewModelScope.launch(Dispatchers.IO) {
++                        commandClient.connect()
++                    }
+                 }
+                 reloadSystemProxyStatus()
+                 reloadStartedAt()
+             }
+ 
+             Status.Stopped -> {
+-                commandClient.disconnect()
++                viewModelScope.launch(Dispatchers.IO) {
++                    commandClient.disconnect()
++                }
+                 updateState {
+                     copy(
+                         hasGroups = false,
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
+index 5d1c0f8..8bb9110 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/dashboard/groups/GroupsViewModel.kt
+@@ -11,7 +11,9 @@ import io.nekohasekai.sfa.compose.model.toList
+ import io.nekohasekai.sfa.constant.Status
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.CommandClient
++import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.launch
+@@ -61,13 +63,17 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+                         commandClient.addHandler(this@GroupsViewModel)
+                     } else {
+                         updateState { copy(isLoading = true) }
+-                        commandClient.connect()
++                        withContext(Dispatchers.IO) {
++                            commandClient.connect()
++                        }
+                     }
+                 } else {
+                     if (isUsingSharedClient) {
+                         commandClient.removeHandler(this@GroupsViewModel)
+                     } else {
+-                        commandClient.disconnect()
++                        withContext(Dispatchers.IO) {
++                            commandClient.disconnect()
++                        }
+                     }
+                 }
+             }
+@@ -76,12 +82,15 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+ 
+     override fun createInitialState() = GroupsUiState()
+ 
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCleared() {
+         super.onCleared()
+         if (isUsingSharedClient) {
+             commandClient.removeHandler(this)
+         } else {
+-            commandClient.disconnect()
++            GlobalScope.launch(Dispatchers.IO) {
++                commandClient.disconnect()
++            }
+         }
+     }
+ 
+@@ -89,11 +98,15 @@ class GroupsViewModel(private val sharedCommandClient: CommandClient? = null) :
+         if (status == Status.Started) {
+             if (!isUsingSharedClient && AppLifecycleObserver.isForeground.value) {
+                 updateState { copy(isLoading = true) }
+-                commandClient.connect()
++                viewModelScope.launch(Dispatchers.IO) {
++                    commandClient.connect()
++                }
+             }
+         } else {
+             if (!isUsingSharedClient) {
+-                commandClient.disconnect()
++                viewModelScope.launch(Dispatchers.IO) {
++                    commandClient.disconnect()
++                }
+             }
+             updateState {
+                 copy(
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/log/LogViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/log/LogViewModel.kt
+index 601a51d..8779cc0 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/log/LogViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/log/LogViewModel.kt
+@@ -7,7 +7,9 @@ import io.nekohasekai.sfa.compose.util.AnsiColorUtils
+ import io.nekohasekai.sfa.constant.Status
+ import io.nekohasekai.sfa.utils.AppLifecycleObserver
+ import io.nekohasekai.sfa.utils.CommandClient
++import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+@@ -33,10 +35,12 @@ class LogViewModel :
+         viewModelScope.launch {
+             AppLifecycleObserver.isForeground.collect { foreground ->
+                 if (lastServiceStatus != Status.Started) return@collect
+-                if (foreground) {
+-                    commandClient.connect()
+-                } else {
+-                    commandClient.disconnect()
++                withContext(Dispatchers.IO) {
++                    if (foreground) {
++                        commandClient.connect()
++                    } else {
++                        commandClient.disconnect()
++                    }
+                 }
+             }
+         }
+@@ -58,12 +62,16 @@ class LogViewModel :
+         when (status) {
+             Status.Started -> {
+                 if (AppLifecycleObserver.isForeground.value) {
+-                    commandClient.connect()
++                    viewModelScope.launch(Dispatchers.IO) {
++                        commandClient.connect()
++                    }
+                 }
+             }
+ 
+             Status.Stopped, Status.Stopping -> {
+-                commandClient.disconnect()
++                viewModelScope.launch(Dispatchers.IO) {
++                    commandClient.disconnect()
++                }
+                 _uiState.update { it.copy(isConnected = false) }
+             }
+ 
+@@ -145,8 +153,11 @@ class LogViewModel :
+         updateDisplayedLogs()
+     }
+ 
++    @OptIn(DelicateCoroutinesApi::class)
+     override fun onCleared() {
+         super.onCleared()
+-        commandClient.disconnect()
++        GlobalScope.launch(Dispatchers.IO) {
++            commandClient.disconnect()
++        }
+     }
+ }
