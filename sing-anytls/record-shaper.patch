@@ -1,0 +1,1033 @@
+diff -ruN '--exclude=.git' pre-rs/client.go fixed/client.go
+--- pre-rs/client.go	2026-03-19 05:19:07.422437614 +0000
++++ fixed/client.go	2026-03-19 05:21:22.881497606 +0000
+@@ -67,13 +67,12 @@
+ 	defer b.Release()
+ 
+ 	b.Write(c.passwordSha256)
+-	var paddingLen int
+-	if pad := c.padding.Load().GenerateRecordPayloadSizes(0); len(pad) > 0 {
+-		paddingLen = pad[0]
+-	}
++	paddingLen := c.padding.Load().SamplePaddingLen()
+ 	binary.BigEndian.PutUint16(b.Extend(2), uint16(paddingLen))
+ 	if paddingLen > 0 {
+-		b.WriteZeroN(paddingLen)
++		randomPadding := make([]byte, paddingLen)
++		util.FillRandom(randomPadding)
++		b.Write(randomPadding)
+ 	}
+ 
+ 	_, err = b.WriteTo(conn)
+diff -ruN '--exclude=.git' pre-rs/padding/padding.go fixed/padding/padding.go
+--- pre-rs/padding/padding.go	2026-03-19 05:19:07.417437611 +0000
++++ fixed/padding/padding.go	2026-03-19 05:21:22.876497604 +0000
+@@ -3,8 +3,8 @@
+ import (
+ 	"crypto/md5"
+ 	"crypto/rand"
++	"encoding/binary"
+ 	"fmt"
+-	"math/big"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -12,23 +12,69 @@
+ 	"github.com/sagernet/sing/common/atomic"
+ )
+ 
+-const CheckMark = -1
++var DefaultPaddingScheme = []byte(`pad_dist=30-60:20,100-300:35,500-1200:30,1200-4000:15
++pad_targets=17,30-50,30-50,80-150
++idle_sizes=9,9,13,13,13,17
++idle_interval=3000-8000
++idle_threshold=500`)
+ 
+-var DefaultPaddingScheme = []byte(`stop=8
+-0=30-30
+-1=100-400
+-2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000
+-3=9-9,500-1000
+-4=500-1000
+-5=500-1000
+-6=500-1000
+-7=500-1000`)
++// PaddingBucket defines a weighted range for multi-modal padding sampling.
++// Multiple buckets create a distribution with several peaks, avoiding the
++// flat uniform fingerprint that a single fixed range produces.
++type PaddingBucket struct {
++	Min    int
++	Max    int
++	Weight int
++}
++
++// PadTarget defines a single padding target: either a fixed value or
++// a range. Used by padControlFrame to select the output size for small
++// control frames (cmdSYN, cmdFIN, etc.).
++type PadTarget struct {
++	Min int
++	Max int
++}
++
++// RecordShaperConfig holds tunable parameters for TLS record-level
++// traffic shaping. Parsed from PaddingScheme keys.
++type RecordShaperConfig struct {
++	PadTargets      []PadTarget // target sizes for padding control frames
++	IdleSizes       []int       // record sizes for idle keepalive injection
++	IdleIntervalMs  [2]int      // [min, max] ms between idle injections
++	IdleThresholdMs int         // ms of silence before considering connection idle
++}
++
++// DefaultRecordShaperConfig returns the built-in configuration.
++func DefaultRecordShaperConfig() RecordShaperConfig {
++	return RecordShaperConfig{
++		PadTargets: []PadTarget{
++			{17, 17},
++			{30, 50},
++			{30, 50},
++			{80, 150},
++		},
++		IdleSizes:       []int{9, 9, 13, 13, 13, 17},
++		IdleIntervalMs:  [2]int{3000, 8000},
++		IdleThresholdMs: 500,
++	}
++}
+ 
+ type PaddingFactory struct {
+-	scheme    util.StringMap
+ 	RawScheme []byte
+-	Stop      uint32
+ 	Md5       string
++
++	// PadBuckets holds the weighted bucket distribution used by
++	// SamplePaddingLen for auth-packet padding. A nil/empty slice
++	// means no padding is generated.
++	PadBuckets []PaddingBucket
++
++	// totalWeight is the precomputed sum of all bucket weights.
++	totalWeight int
++
++	// RecordConfig holds parameters for the TLS record-level traffic
++	// shaper. Parsed from the PaddingScheme; falls back to
++	// DefaultRecordShaperConfig when absent.
++	RecordConfig RecordShaperConfig
+ }
+ 
+ func UpdatePaddingScheme(rawScheme []byte, to *atomic.TypedValue[*PaddingFactory]) bool {
+@@ -48,45 +94,167 @@
+ 	if len(scheme) == 0 {
+ 		return nil
+ 	}
+-	if stop, err := strconv.Atoi(scheme["stop"]); err == nil {
+-		p.Stop = uint32(stop)
+-	} else {
+-		return nil
++
++	// Parse pad_dist — format: "min-max:weight,min-max:weight,..."
++	// Falls back to a sensible default if missing or malformed.
++	if dist, ok := scheme["pad_dist"]; ok {
++		p.PadBuckets = parseBuckets(dist)
++	}
++	if len(p.PadBuckets) == 0 {
++		p.PadBuckets = []PaddingBucket{
++			{30, 60, 20},
++			{100, 300, 35},
++			{500, 1200, 30},
++			{1200, 4000, 15},
++		}
++	}
++	for _, b := range p.PadBuckets {
++		p.totalWeight += b.Weight
+ 	}
+-	p.scheme = scheme
++
++	// Parse record shaper config.
++	p.RecordConfig = parseRecordShaperConfig(scheme)
++
+ 	return p
+ }
+ 
+-func (p *PaddingFactory) GenerateRecordPayloadSizes(pkt uint32) (pktSizes []int) {
+-	if s, ok := p.scheme[strconv.Itoa(int(pkt))]; ok {
+-		sRanges := strings.Split(s, ",")
+-		for _, sRange := range sRanges {
+-			sRangeMinMax := strings.Split(sRange, "-")
+-			if len(sRangeMinMax) == 2 {
+-				_min, err := strconv.ParseInt(sRangeMinMax[0], 10, 64)
+-				if err != nil {
+-					continue
+-				}
+-				_max, err := strconv.ParseInt(sRangeMinMax[1], 10, 64)
+-				if err != nil {
+-					continue
+-				}
+-				if _min > _max {
+-					_min, _max = _max, _min
+-				}
+-				if _min <= 0 || _max <= 0 {
+-					continue
+-				}
+-				if _min == _max {
+-					pktSizes = append(pktSizes, int(_min))
+-				} else {
+-					i, _ := rand.Int(rand.Reader, big.NewInt(_max-_min))
+-					pktSizes = append(pktSizes, int(i.Int64()+_min))
+-				}
+-			} else if sRange == "c" {
+-				pktSizes = append(pktSizes, CheckMark)
++func parseRecordShaperConfig(scheme util.StringMap) RecordShaperConfig {
++	cfg := DefaultRecordShaperConfig()
++
++	if s, ok := scheme["pad_targets"]; ok {
++		if targets := parsePadTargets(s); len(targets) > 0 {
++			cfg.PadTargets = targets
++		}
++	}
++
++	if s, ok := scheme["idle_sizes"]; ok {
++		if sizes := parseIntList(s); len(sizes) > 0 {
++			cfg.IdleSizes = sizes
++		}
++	}
++
++	if s, ok := scheme["idle_interval"]; ok {
++		if lo, hi, ok := parseRange(s); ok {
++			cfg.IdleIntervalMs = [2]int{lo, hi}
++		}
++	}
++
++	if s, ok := scheme["idle_threshold"]; ok {
++		if v, err := strconv.Atoi(s); err == nil && v > 0 {
++			cfg.IdleThresholdMs = v
++		}
++	}
++
++	return cfg
++}
++
++func parsePadTargets(s string) []PadTarget {
++	var targets []PadTarget
++	for _, part := range strings.Split(s, ",") {
++		part = strings.TrimSpace(part)
++		rangeParts := strings.SplitN(part, "-", 2)
++		if len(rangeParts) == 1 {
++			v, err := strconv.Atoi(rangeParts[0])
++			if err != nil || v <= 0 {
++				continue
++			}
++			targets = append(targets, PadTarget{v, v})
++		} else {
++			lo, err1 := strconv.Atoi(rangeParts[0])
++			hi, err2 := strconv.Atoi(rangeParts[1])
++			if err1 != nil || err2 != nil || lo <= 0 || hi <= 0 {
++				continue
+ 			}
++			if lo > hi {
++				lo, hi = hi, lo
++			}
++			targets = append(targets, PadTarget{lo, hi})
++		}
++	}
++	return targets
++}
++
++func parseRange(s string) (int, int, bool) {
++	parts := strings.SplitN(s, "-", 2)
++	if len(parts) != 2 {
++		return 0, 0, false
++	}
++	lo, err1 := strconv.Atoi(parts[0])
++	hi, err2 := strconv.Atoi(parts[1])
++	if err1 != nil || err2 != nil || lo <= 0 || hi <= 0 {
++		return 0, 0, false
++	}
++	if lo > hi {
++		lo, hi = hi, lo
++	}
++	return lo, hi, true
++}
++
++func parseIntList(s string) []int {
++	var result []int
++	for _, part := range strings.Split(s, ",") {
++		part = strings.TrimSpace(part)
++		if v, err := strconv.Atoi(part); err == nil && v > 0 {
++			result = append(result, v)
++		}
++	}
++	return result
++}
++
++func parseBuckets(s string) []PaddingBucket {
++	var buckets []PaddingBucket
++	for _, part := range strings.Split(s, ",") {
++		part = strings.TrimSpace(part)
++		colonIdx := strings.LastIndex(part, ":")
++		if colonIdx < 0 {
++			continue
+ 		}
++		rangePart := part[:colonIdx]
++		weightPart := part[colonIdx+1:]
++
++		weight, err := strconv.Atoi(weightPart)
++		if err != nil || weight <= 0 {
++			continue
++		}
++
++		rangeParts := strings.SplitN(rangePart, "-", 2)
++		if len(rangeParts) != 2 {
++			continue
++		}
++		bMin, err1 := strconv.Atoi(rangeParts[0])
++		bMax, err2 := strconv.Atoi(rangeParts[1])
++		if err1 != nil || err2 != nil || bMin <= 0 || bMax <= 0 {
++			continue
++		}
++		if bMin > bMax {
++			bMin, bMax = bMax, bMin
++		}
++		buckets = append(buckets, PaddingBucket{Min: bMin, Max: bMax, Weight: weight})
++	}
++	return buckets
++}
++
++func (p *PaddingFactory) SamplePaddingLen() int {
++	if len(p.PadBuckets) == 0 || p.totalWeight <= 0 {
++		return 0
++	}
++
++	var entropy [8]byte
++	rand.Read(entropy[:])
++
++	pick := int(binary.LittleEndian.Uint32(entropy[:4])) % p.totalWeight
++	var bucket PaddingBucket
++	for _, b := range p.PadBuckets {
++		pick -= b.Weight
++		if pick < 0 {
++			bucket = b
++			break
++		}
++	}
++
++	if bucket.Min == bucket.Max {
++		return bucket.Min
+ 	}
+-	return
++	span := bucket.Max - bucket.Min + 1
++	return bucket.Min + int(binary.LittleEndian.Uint32(entropy[4:]))%span
+ }
+diff -ruN '--exclude=.git' pre-rs/session/record_shaper.go fixed/session/record_shaper.go
+--- pre-rs/session/record_shaper.go	1970-01-01 00:00:00.000000000 +0000
++++ fixed/session/record_shaper.go	2026-03-19 05:20:05.973463545 +0000
+@@ -0,0 +1,178 @@
++package session
++
++import (
++	"crypto/rand"
++	"encoding/binary"
++	"net"
++	"time"
++
++	"github.com/anytls/sing-anytls/padding"
++	"github.com/anytls/sing-anytls/util"
++	"github.com/sagernet/sing/common/atomic"
++)
++
++const (
++	controlFrameThreshold = 21
++	writeDeadline         = 5 * time.Second
++)
++
++type RecordShaper struct {
++	conn      net.Conn
++	LastWrite time.Time
++
++	cfg        padding.RecordShaperConfig
++	paddingSrc *atomic.TypedValue[*padding.PaddingFactory]
++	lastCfgMd5 string
++}
++
++func newRecordShaper(conn net.Conn, paddingSrc *atomic.TypedValue[*padding.PaddingFactory]) *RecordShaper {
++	pf := paddingSrc.Load()
++	return &RecordShaper{
++		conn:       conn,
++		LastWrite:  time.Now(),
++		paddingSrc: paddingSrc,
++		cfg:        pf.RecordConfig,
++		lastCfgMd5: pf.Md5,
++	}
++}
++
++func (rs *RecordShaper) maybeRefreshConfig() {
++	pf := rs.paddingSrc.Load()
++	if pf.Md5 != rs.lastCfgMd5 {
++		rs.cfg = pf.RecordConfig
++		rs.lastCfgMd5 = pf.Md5
++	}
++}
++
++// WriteData sends data-frame bytes to the TLS connection WITHOUT a
++// write deadline, matching the upstream behaviour where data-frame
++// writes never had a timeout.  On a congested mobile link the TCP
++// send buffer may take seconds to drain; a 5-second deadline would
++// kill the session prematurely.
++func (rs *RecordShaper) WriteData(b []byte) (int, error) {
++	total := len(b)
++	_, err := rs.conn.Write(b)
++	if err == nil {
++		rs.LastWrite = time.Now()
++	}
++	return total, err
++}
++
++// WriteControl sends control-frame bytes.  Small frames (≤21 B) are
++// padded with a cmdWaste trailer and written with a 5-second deadline,
++// reproducing the upstream writeControlFrame semantics.
++func (rs *RecordShaper) WriteControl(b []byte) (int, error) {
++	total := len(b)
++	if len(b) <= controlFrameThreshold {
++		b = rs.padControlFrame(b)
++	}
++	rs.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
++	_, err := rs.conn.Write(b)
++	rs.conn.SetWriteDeadline(time.Time{})
++	if err == nil {
++		rs.LastWrite = time.Now()
++	}
++	return total, err
++}
++
++func (rs *RecordShaper) padControlFrame(b []byte) []byte {
++	rs.maybeRefreshConfig()
++	targets := rs.cfg.PadTargets
++	if len(targets) == 0 {
++		return b
++	}
++
++	minTarget := len(b) + headerOverHeadSize
++	var eligible []padding.PadTarget
++	for _, t := range targets {
++		if t.Max >= minTarget {
++			eligible = append(eligible, t)
++		}
++	}
++	if len(eligible) == 0 {
++		return b
++	}
++
++	picked := eligible[cryptoRandIntn(len(eligible))]
++	var target int
++	if picked.Min == picked.Max {
++		target = picked.Min
++	} else {
++		lo := picked.Min
++		if lo < minTarget {
++			lo = minTarget
++		}
++		target = lo + cryptoRandIntn(picked.Max-lo+1)
++	}
++
++	gap := target - len(b)
++	wastePayload := gap - headerOverHeadSize
++	if wastePayload < 0 {
++		wastePayload = 0
++	}
++
++	out := make([]byte, 0, target)
++	out = append(out, b...)
++
++	var hdr [headerOverHeadSize]byte
++	hdr[0] = cmdWaste
++	binary.BigEndian.PutUint32(hdr[1:5], 0)
++	binary.BigEndian.PutUint16(hdr[5:7], uint16(wastePayload))
++	out = append(out, hdr[:]...)
++	if wastePayload > 0 {
++		pad := make([]byte, wastePayload)
++		util.FillRandom(pad)
++		out = append(out, pad...)
++	}
++	return out
++}
++
++// BuildIdleFrame returns a small waste frame, or nil if the connection
++// hasn't been idle long enough.  The caller writes the bytes.
++func (rs *RecordShaper) BuildIdleFrame() []byte {
++	rs.maybeRefreshConfig()
++
++	idleThreshold := time.Duration(rs.cfg.IdleThresholdMs) * time.Millisecond
++	if time.Since(rs.LastWrite) < idleThreshold {
++		return nil
++	}
++
++	sizes := rs.cfg.IdleSizes
++	if len(sizes) == 0 {
++		return nil
++	}
++	size := sizes[cryptoRandIntn(len(sizes))]
++
++	wastePayload := size - headerOverHeadSize
++	if wastePayload < 0 {
++		wastePayload = 0
++	}
++
++	record := make([]byte, headerOverHeadSize+wastePayload)
++	record[0] = cmdWaste
++	binary.BigEndian.PutUint32(record[1:5], 0)
++	binary.BigEndian.PutUint16(record[5:7], uint16(wastePayload))
++	if wastePayload > 0 {
++		util.FillRandom(record[headerOverHeadSize:])
++	}
++	return record
++}
++
++func (rs *RecordShaper) IdleInterval() time.Duration {
++	lo := rs.cfg.IdleIntervalMs[0]
++	hi := rs.cfg.IdleIntervalMs[1]
++	if lo <= 0 || hi <= 0 || lo > hi {
++		return time.Duration(lo) * time.Millisecond
++	}
++	ms := lo + cryptoRandIntn(hi-lo+1)
++	return time.Duration(ms) * time.Millisecond
++}
++
++func cryptoRandIntn(n int) int {
++	if n <= 1 {
++		return 0
++	}
++	var b [4]byte
++	rand.Read(b[:])
++	return int(binary.LittleEndian.Uint32(b[:])) % n
++}
+diff -ruN '--exclude=.git' pre-rs/session/session.go fixed/session/session.go
+--- pre-rs/session/session.go	2026-03-19 05:19:07.438437621 +0000
++++ fixed/session/session.go	2026-03-19 05:21:08.951491437 +0000
+@@ -6,7 +6,6 @@
+ 	"fmt"
+ 	"io"
+ 	"net"
+-	"slices"
+ 	"strconv"
+ 	"sync"
+ 	"time"
+@@ -30,16 +29,8 @@
+ 	die     chan struct{}
+ 	dieHook func()
+ 
+-	// lastSynAckSec is the Unix second when the last SYNACK was received.
+-	// Used by per-stream SYNACK timeout to decide whether a timeout
+-	// indicates a dead session or just a slow target.
+ 	lastSynAckSec atomic.Uint32
+-
+-	// connBroken is set when a write to the underlying conn fails.
+-	// A broken session will not be reused for new streams and will be
+-	// cleaned up by idleLoop, giving concurrent streams time to finish
+-	// reading in-flight responses instead of being killed by s.Close().
+-	connBroken atomic.Bool
++	connBroken    atomic.Bool
+ 
+ 	// pool
+ 	seq       uint64
+@@ -50,11 +41,14 @@
+ 	peerVersion byte
+ 
+ 	// client
+-	isClient    bool
+-	sendPadding bool
+-	buffering   bool
+-	buffer      []byte
+-	pktCounter  atomic.Uint32
++	isClient  bool
++	buffering bool
++	buffer    []byte
++
++	shaper *RecordShaper
++
++	idleReady     chan struct{}
++	idleReadyOnce sync.Once
+ 
+ 	// server
+ 	onNewStream func(stream *Stream)
+@@ -62,14 +56,15 @@
+ 
+ func NewClientSession(conn net.Conn, _padding *atomic.TypedValue[*padding.PaddingFactory], logger logger.Logger) *Session {
+ 	s := &Session{
+-		conn:        conn,
+-		isClient:    true,
+-		sendPadding: true,
+-		padding:     _padding,
+-		logger:      logger,
++		conn:     conn,
++		isClient: true,
++		padding:  _padding,
++		logger:   logger,
+ 	}
+ 	s.die = make(chan struct{})
+ 	s.streams = make(map[uint32]*Stream)
++	s.shaper = newRecordShaper(conn, _padding)
++	s.idleReady = make(chan struct{})
+ 	return s
+ }
+ 
+@@ -82,10 +77,14 @@
+ 	}
+ 	s.die = make(chan struct{})
+ 	s.streams = make(map[uint32]*Stream)
++	s.shaper = newRecordShaper(conn, _padding)
++	s.idleReady = make(chan struct{})
+ 	return s
+ }
+ 
+ func (s *Session) Run() {
++	go s.idleLoop()
++
+ 	if !s.isClient {
+ 		s.recvLoop()
+ 		return
+@@ -95,6 +94,7 @@
+ 		"v":           "2",
+ 		"client":      util.Verison,
+ 		"padding-md5": s.padding.Load().Md5,
++		"rs":          "1",
+ 	}
+ 	f := newFrame(cmdSettings, 0)
+ 	f.data = settings.ToBytes()
+@@ -104,7 +104,6 @@
+ 	go s.recvLoop()
+ }
+ 
+-// IsClosed does a safe check to see if we have shutdown
+ func (s *Session) IsClosed() bool {
+ 	select {
+ 	case <-s.die:
+@@ -114,7 +113,10 @@
+ 	}
+ }
+ 
+-// Close is used to close the session and all streams.
++func (s *Session) signalIdleReady() {
++	s.idleReadyOnce.Do(func() { close(s.idleReady) })
++}
++
+ func (s *Session) Close() error {
+ 	var once bool
+ 	s.dieOnce.Do(func() {
+@@ -122,6 +124,7 @@
+ 		once = true
+ 	})
+ 	if once {
++		s.signalIdleReady()
+ 		if s.dieHook != nil {
+ 			s.dieHook()
+ 			s.dieHook = nil
+@@ -132,13 +135,15 @@
+ 		}
+ 		s.streams = make(map[uint32]*Stream)
+ 		s.streamLock.Unlock()
+-		return s.conn.Close()
++		s.connLock.Lock()
++		err := s.conn.Close()
++		s.connLock.Unlock()
++		return err
+ 	} else {
+ 		return io.ErrClosedPipe
+ 	}
+ }
+ 
+-// OpenStream is used to create a new stream for CLIENT
+ func (s *Session) OpenStream() (*Stream, error) {
+ 	if s.IsClosed() || s.connBroken.Load() {
+ 		return nil, io.ErrClosedPipe
+@@ -148,15 +153,9 @@
+ 	stream := newStream(sid, s)
+ 
+ 	if sid >= 2 && s.peerVersion >= 2 {
+-		// Per-stream SYNACK timeout: if the server doesn't acknowledge
+-		// this stream within the deadline, close only THIS stream.
+-		// Previous design used a session-level 3s timer that killed the
+-		// entire session, causing all concurrent streams to die together.
+ 		openedAt := uint32(time.Now().Unix())
+ 		stream.synTimer = time.AfterFunc(time.Second*5, func() {
+ 			stream.closeWithError(fmt.Errorf("SYNACK timeout"))
+-			// If no SYNACK has been received on this session since
+-			// the stream was opened, the connection is likely dead.
+ 			if s.lastSynAckSec.Load() < openedAt {
+ 				s.Close()
+ 			}
+@@ -170,7 +169,9 @@
+ 		return nil, err
+ 	}
+ 
+-	s.buffering = false // proxy Write it's SocksAddr to flush the buffer
++	s.connLock.Lock()
++	s.buffering = false
++	s.connLock.Unlock()
+ 
+ 	s.streamLock.Lock()
+ 	defer s.streamLock.Unlock()
+@@ -187,11 +188,6 @@
+ }
+ 
+ func (s *Session) recvLoop() error {
+-	// defer func() {
+-	// 	if r := recover(); r != nil {
+-	// 		logrus.Errorln("[BUG]", r, string(debug.Stack()))
+-	// 	}
+-	// }()
+ 	defer s.Close()
+ 
+ 	var receivedSettingsFromClient bool
+@@ -201,7 +197,6 @@
+ 		if s.IsClosed() {
+ 			return io.ErrClosedPipe
+ 		}
+-		// read header first
+ 		if _, err := io.ReadFull(s.conn, hdr[:]); err == nil {
+ 			sid := hdr.StreamID()
+ 			switch hdr.Cmd() {
+@@ -221,7 +216,7 @@
+ 						return err
+ 					}
+ 				}
+-			case cmdSYN: // should be server only
++			case cmdSYN:
+ 				if !s.isClient && !receivedSettingsFromClient {
+ 					f := newFrame(cmdAlert, 0)
+ 					f.data = []byte("client did not send its settings")
+@@ -241,7 +236,7 @@
+ 					}()
+ 				}
+ 				s.streamLock.Unlock()
+-			case cmdSYNACK: // should be client only
++			case cmdSYNACK:
+ 				s.lastSynAckSec.Store(uint32(time.Now().Unix()))
+ 				s.streamLock.RLock()
+ 				synStream, synOk := s.streams[sid]
+@@ -256,7 +251,6 @@
+ 						buf.Put(buffer)
+ 						return err
+ 					}
+-					// report error
+ 					s.streamLock.RLock()
+ 					stream, ok := s.streams[sid]
+ 					s.streamLock.RUnlock()
+@@ -292,30 +286,60 @@
+ 					if !s.isClient {
+ 						receivedSettingsFromClient = true
+ 						m := util.StringMapFromBytes(buffer)
++
++						if m["rs"] != "1" {
++							f := newFrame(cmdAlert, 0)
++							f.data = []byte("client does not support record shaper, please upgrade")
++							s.writeControlFrame(f)
++							buf.Put(buffer)
++							return nil
++						}
++
+ 						paddingF := s.padding.Load()
+-						if m["padding-md5"] != paddingF.Md5 {
++						needUpdate := m["padding-md5"] != paddingF.Md5
++						needServerSettings := false
++						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
++							s.peerVersion = byte(v)
++							needServerSettings = true
++						}
++
++						if needUpdate && needServerSettings {
++							s.connLock.Lock()
++							s.buffering = true
++							s.connLock.Unlock()
++						}
++
++						if needUpdate {
+ 							f := newFrame(cmdUpdatePaddingScheme, 0)
+ 							f.data = paddingF.RawScheme
+ 							_, err = s.writeControlFrame(f)
+ 							if err != nil {
++								s.connLock.Lock()
++								s.buffering = false
++								s.connLock.Unlock()
+ 								buf.Put(buffer)
+ 								return err
+ 							}
+ 						}
+-						// check client's version
+-						if v, err := strconv.Atoi(m["v"]); err == nil && v >= 2 {
+-							s.peerVersion = byte(v)
+-							// send cmdServerSettings
++						if needServerSettings {
+ 							f := newFrame(cmdServerSettings, 0)
+ 							f.data = util.StringMap{
+ 								"v": "2",
+ 							}.ToBytes()
+ 							_, err = s.writeControlFrame(f)
+ 							if err != nil {
++								s.connLock.Lock()
++								s.buffering = false
++								s.connLock.Unlock()
+ 								buf.Put(buffer)
+ 								return err
+ 							}
+ 						}
++						s.connLock.Lock()
++						s.buffering = false
++						s.connLock.Unlock()
++
++						s.signalIdleReady()
+ 					}
+ 					buf.Put(buffer)
+ 				}
+@@ -334,7 +358,6 @@
+ 				}
+ 			case cmdUpdatePaddingScheme:
+ 				if hdr.Length() > 0 {
+-					// `rawScheme` Do not use buffer to prevent subsequent misuse
+ 					rawScheme := make([]byte, int(hdr.Length()))
+ 					if _, err := io.ReadFull(s.conn, rawScheme); err != nil {
+ 						return err
+@@ -352,7 +375,6 @@
+ 					return err
+ 				}
+ 			case cmdHeartResponse:
+-				// Active keepalive checking is not implemented yet
+ 				break
+ 			case cmdServerSettings:
+ 				if hdr.Length() > 0 {
+@@ -362,17 +384,15 @@
+ 						return err
+ 					}
+ 					if s.isClient {
+-						// check server's version
+ 						m := util.StringMapFromBytes(buffer)
+ 						if v, err := strconv.Atoi(m["v"]); err == nil {
+ 							s.peerVersion = byte(v)
+ 						}
++						s.signalIdleReady()
+ 					}
+ 					buf.Put(buffer)
+ 				}
+ 			default:
+-				// Unknown command — skip any associated data to maintain
+-				// frame alignment (forward compatibility & probe resilience)
+ 				if hdr.Length() > 0 {
+ 					buffer := buf.Get(int(hdr.Length()))
+ 					if _, err := io.ReadFull(s.conn, buffer); err != nil {
+@@ -402,9 +422,6 @@
+ func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
+ 	totalLen := len(data)
+ 
+-	// Chunk oversized payloads to prevent uint16 overflow truncation.
+-	// The receiver reassembles per-stream via pipe, so multiple PSH
+-	// frames are transparent.
+ 	for len(data) > 0 {
+ 		chunk := data
+ 		if len(chunk) > maxFrameDataLen {
+@@ -418,10 +435,14 @@
+ 		binary.BigEndian.PutUint16(buffer.Extend(2), uint16(chunkLen))
+ 		buffer.Write(chunk)
+ 
+-		_, err := s.writeConn(buffer.Bytes(), time.Second*5)
++		// Data-frame writes have NO deadline, matching upstream.
++		// On error mark connBroken so the session won't be reused,
++		// but do NOT Close — let the recvLoop continue draining any
++		// in-flight responses for other streams (upstream behaviour).
++		_, err := s.writeConn(buffer.Bytes(), false)
+ 		buffer.Release()
+ 		if err != nil {
+-			s.Close()
++			s.connBroken.Store(true)
+ 			return 0, err
+ 		}
+ 
+@@ -443,7 +464,9 @@
+ 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+ 	buffer.Write(frame.data)
+ 
+-	_, err := s.writeConn(buffer.Bytes(), time.Second*5)
++	// Control-frame writes use a 5 s deadline (via WriteControl)
++	// and Close the session on failure, matching upstream.
++	_, err := s.writeConn(buffer.Bytes(), true)
+ 	buffer.Release()
+ 	if err != nil {
+ 		s.Close()
+@@ -453,83 +476,90 @@
+ 	return dataLen, nil
+ }
+ 
+-func (s *Session) writeConn(b []byte, deadline time.Duration) (n int, err error) {
++// writeConn handles buffer management.  When isCtrl is true the final
++// write uses shaper.WriteControl (5 s deadline + padding); when false
++// it uses shaper.WriteData (no deadline, no padding).
++//
++// A buffer flush always uses WriteData because the blob is large and
++// the very first write on a new session should never be deadline-killed.
++func (s *Session) writeConn(b []byte, isCtrl bool) (n int, err error) {
+ 	s.connLock.Lock()
+ 	defer s.connLock.Unlock()
+ 
+-	if deadline > 0 {
+-		s.conn.SetWriteDeadline(time.Now().Add(deadline))
+-		defer s.conn.SetWriteDeadline(time.Time{})
++	if s.IsClosed() {
++		return 0, io.ErrClosedPipe
+ 	}
+ 
+ 	if s.buffering {
+-		s.buffer = slices.Concat(s.buffer, b)
++		s.buffer = append(s.buffer, b...)
+ 		return len(b), nil
+-	} else if len(s.buffer) > 0 {
+-		b = slices.Concat(s.buffer, b)
++	}
++	if len(s.buffer) > 0 {
++		// Flush: prepend buffer contents.  Always use WriteData for
++		// the flushed blob (it contains mixed frames and is large).
++		b = append(s.buffer, b...)
+ 		s.buffer = nil
++		return s.shaper.WriteData(b)
+ 	}
+ 
+-	// calulate & send padding
+-	if s.sendPadding {
+-		pkt := s.pktCounter.Add(1)
+-		paddingF := s.padding.Load()
+-		if pkt < paddingF.Stop {
+-			pktSizes := paddingF.GenerateRecordPayloadSizes(pkt)
+-			for _, l := range pktSizes {
+-				remainPayloadLen := len(b)
+-				if l == padding.CheckMark {
+-					if remainPayloadLen == 0 {
+-						break
+-					} else {
+-						continue
+-					}
+-				}
+-				if remainPayloadLen > l { // this packet is all payload
+-					_, err = s.conn.Write(b[:l])
+-					if err != nil {
+-						return 0, err
+-					}
+-					n += l
+-					b = b[l:]
+-				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
+-					paddingLen := l - remainPayloadLen - headerOverHeadSize
+-					if paddingLen > 0 {
+-						padding := make([]byte, headerOverHeadSize+paddingLen)
+-						padding[0] = cmdWaste
+-						binary.BigEndian.PutUint32(padding[1:5], 0)
+-						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
+-						b = slices.Concat(b, padding)
+-					}
+-					_, err = s.conn.Write(b)
+-					if err != nil {
+-						return 0, err
+-					}
+-					n += remainPayloadLen
+-					b = nil
+-				} else { // this packet is all padding
+-					padding := make([]byte, headerOverHeadSize+l)
+-					padding[0] = cmdWaste
+-					binary.BigEndian.PutUint32(padding[1:5], 0)
+-					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
+-					_, err = s.conn.Write(padding)
+-					if err != nil {
+-						return 0, err
+-					}
+-					b = nil
++	if isCtrl {
++		return s.shaper.WriteControl(b)
++	}
++	return s.shaper.WriteData(b)
++}
++
++func (s *Session) idleLoop() {
++	select {
++	case <-s.die:
++		return
++	case <-s.idleReady:
++	}
++
++	for {
++		s.connLock.Lock()
++		interval := s.shaper.IdleInterval()
++		s.connLock.Unlock()
++
++		select {
++		case <-s.die:
++			return
++		case <-time.After(interval):
++			select {
++			case <-s.die:
++				return
++			default:
++			}
++
++			s.connLock.Lock()
++			if s.IsClosed() || s.connBroken.Load() {
++				s.connLock.Unlock()
++				if s.connBroken.Load() && !s.IsClosed() {
++					s.Close()
+ 				}
++				return
++			}
++			if s.buffering {
++				s.connLock.Unlock()
++				continue
+ 			}
+-			// maybe still remain payload to write
+-			if len(b) == 0 {
++			frame := s.shaper.BuildIdleFrame()
++			if frame == nil {
++				s.connLock.Unlock()
++				continue
++			}
++			s.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
++			_, err := s.conn.Write(frame)
++			s.conn.SetWriteDeadline(time.Time{})
++			if err == nil {
++				s.shaper.LastWrite = time.Now()
++			}
++			s.connLock.Unlock()
++
++			if err != nil {
++				s.connBroken.Store(true)
++				s.Close()
+ 				return
+-			} else {
+-				n2, err := s.conn.Write(b)
+-				return n + n2, err
+ 			}
+-		} else {
+-			s.sendPadding = false
+ 		}
+ 	}
+-
+-	return s.conn.Write(b)
+ }
+diff -ruN '--exclude=.git' pre-rs/util/rand.go fixed/util/rand.go
+--- pre-rs/util/rand.go	1970-01-01 00:00:00.000000000 +0000
++++ fixed/util/rand.go	2026-03-19 05:21:22.889497610 +0000
+@@ -0,0 +1,24 @@
++package util
++
++import (
++	"encoding/binary"
++	mrand "math/rand/v2"
++)
++
++// FillRandom fills b with pseudo-random bytes using math/rand/v2's
++// auto-seeded ChaCha8 PRNG. This is suitable for padding and waste
++// bytes that do not require cryptographic randomness. Zero heap
++// allocations; no syscalls after program init.
++func FillRandom(b []byte) {
++	for len(b) >= 8 {
++		binary.LittleEndian.PutUint64(b, mrand.Uint64())
++		b = b[8:]
++	}
++	if len(b) > 0 {
++		val := mrand.Uint64()
++		for i := range b {
++			b[i] = byte(val)
++			val >>= 8
++		}
++	}
++}
