@@ -1,0 +1,101 @@
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/EditProfileContentViewModel.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/EditProfileContentViewModel.kt
+index 1c19a9b..19ecf27 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/EditProfileContentViewModel.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/EditProfileContentViewModel.kt
+@@ -55,17 +55,15 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+     fun setEditor(textProcessor: ManualScrollTextProcessor, isReadOnly: Boolean = false) {
+         val isNewEditor = editor != textProcessor
+         editor = textProcessor
++
++        if (!isNewEditor) return
++
+         textProcessor.resumeAutoScroll()
+ 
+-        // Always keep these for scrolling, focus, and selection
+         textProcessor.isEnabled = true
+         textProcessor.isFocusable = true
+         textProcessor.isFocusableInTouchMode = true
+ 
+-        // Allow text selection for copying
+-        textProcessor.setTextIsSelectable(true)
+-
+-        // Multi-line configuration
+         textProcessor.setSingleLine(false)
+         textProcessor.maxLines = Integer.MAX_VALUE
+         textProcessor.inputType = android.text.InputType.TYPE_CLASS_TEXT or
+@@ -74,6 +72,7 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+         textProcessor.isCursorVisible = true
+ 
+         if (isReadOnly) {
++            textProcessor.setTextIsSelectable(true)
+             // Use a custom OnKeyListener that blocks all key input
+             textProcessor.setOnKeyListener { _, _, _ -> true } // Return true to consume all key events
+             // Enable long click for selection
+@@ -120,19 +119,15 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+ 
+             // Only add text change listener for new editors in editable mode
+             if (isNewEditor) {
+-                textProcessor.addTextChangedListener { editable ->
+-                    val currentText = editable?.toString() ?: ""
++                textProcessor.addTextChangedListener {
+                     _uiState.update { state ->
+                         state.copy(
+-                            content = currentText,
++                            hasUnsavedChanges = true,
+                             canUndo = textProcessor.canUndo(),
+                             canRedo = textProcessor.canRedo(),
+-                            hasUnsavedChanges = currentText != state.originalContent,
+                         )
+                     }
+-
+-                    // Schedule background configuration check
+-                    scheduleConfigurationCheck(currentText)
++                    scheduleConfigurationCheck(it?.toString() ?: "")
+                 }
+             }
+         }
+@@ -280,9 +275,15 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+                         editor?.let {
+                             it.resumeAutoScroll()
+                             it.setTextContent(formatted)
++                            _uiState.update { state ->
++                                state.copy(
++                                    canUndo = it.canUndo(),
++                                    canRedo = it.canRedo(),
++                                    hasUnsavedChanges = formatted != state.originalContent,
++                                )
++                            }
+                         }
+                     }
+-                    // Note: hasUnsavedChanges will be updated by the text change listener
+                 }
+ 
+                 _uiState.update { it.copy(isLoading = false) }
+@@ -306,6 +307,7 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+                     state.copy(
+                         canUndo = it.canUndo(),
+                         canRedo = it.canRedo(),
++                        hasUnsavedChanges = it.text.toString() != state.originalContent,
+                     )
+                 }
+             }
+@@ -321,6 +323,7 @@ class EditProfileContentViewModel(private val profileId: Long, initialProfileNam
+                     state.copy(
+                         canUndo = it.canUndo(),
+                         canRedo = it.canRedo(),
++                        hasUnsavedChanges = it.text.toString() != state.originalContent,
+                     )
+                 }
+             }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/ManualScrollTextProcessor.java b/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/ManualScrollTextProcessor.java
+index ad1ead9..7394544 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/ManualScrollTextProcessor.java
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/profile/ManualScrollTextProcessor.java
+@@ -84,6 +84,7 @@ public class ManualScrollTextProcessor extends TextProcessor {
+       case MotionEvent.ACTION_CANCEL:
+         if (userDragging) {
+           maybeRestoreSelection();
++          userDragging = false;
+         } else {
+           resumeAutoScroll();
+         }
