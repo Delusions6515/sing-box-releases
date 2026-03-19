@@ -1,0 +1,125 @@
+diff --git a/session/session.go b/session/session.go
+index a19dfe8..217d585 100644
+--- a/session/session.go
++++ b/session/session.go
+@@ -30,8 +30,10 @@ type Session struct {
+ 	die     chan struct{}
+ 	dieHook func()
+ 
+-	synDone     func()
+-	synDoneLock sync.Mutex
++	// lastSynAckSec is the Unix second when the last SYNACK was received.
++	// Used by per-stream SYNACK timeout to decide whether a timeout
++	// indicates a dead session or just a slow target.
++	lastSynAckSec atomic.Uint32
+ 
+ 	// connBroken is set when a write to the underlying conn fails.
+ 	// A broken session will not be reused for new streams and will be
+@@ -138,7 +140,7 @@ func (s *Session) Close() error {
+ 
+ // OpenStream is used to create a new stream for CLIENT
+ func (s *Session) OpenStream() (*Stream, error) {
+-	if s.IsClosed() {
++	if s.IsClosed() || s.connBroken.Load() {
+ 		return nil, io.ErrClosedPipe
+ 	}
+ 
+@@ -146,17 +148,25 @@ func (s *Session) OpenStream() (*Stream, error) {
+ 	stream := newStream(sid, s)
+ 
+ 	if sid >= 2 && s.peerVersion >= 2 {
+-		s.synDoneLock.Lock()
+-		if s.synDone != nil {
+-			s.synDone()
+-		}
+-		s.synDone = util.NewDeadlineWatcher(time.Second*3, func() {
+-			s.Close()
++		// Per-stream SYNACK timeout: if the server doesn't acknowledge
++		// this stream within the deadline, close only THIS stream.
++		// Previous design used a session-level 3s timer that killed the
++		// entire session, causing all concurrent streams to die together.
++		openedAt := uint32(time.Now().Unix())
++		stream.synTimer = time.AfterFunc(time.Second*5, func() {
++			stream.closeWithError(fmt.Errorf("SYNACK timeout"))
++			// If no SYNACK has been received on this session since
++			// the stream was opened, the connection is likely dead.
++			if s.lastSynAckSec.Load() < openedAt {
++				s.Close()
++			}
+ 		})
+-		s.synDoneLock.Unlock()
+ 	}
+ 
+ 	if _, err := s.writeControlFrame(newFrame(cmdSYN, sid)); err != nil {
++		if stream.synTimer != nil {
++			stream.synTimer.Stop()
++		}
+ 		return nil, err
+ 	}
+ 
+@@ -166,6 +176,9 @@ func (s *Session) OpenStream() (*Stream, error) {
+ 	defer s.streamLock.Unlock()
+ 	select {
+ 	case <-s.die:
++		if stream.synTimer != nil {
++			stream.synTimer.Stop()
++		}
+ 		return nil, io.ErrClosedPipe
+ 	default:
+ 		s.streams[sid] = stream
+@@ -229,12 +242,14 @@ func (s *Session) recvLoop() error {
+ 				}
+ 				s.streamLock.Unlock()
+ 			case cmdSYNACK: // should be client only
+-				s.synDoneLock.Lock()
+-				if s.synDone != nil {
+-					s.synDone()
+-					s.synDone = nil
++				s.lastSynAckSec.Store(uint32(time.Now().Unix()))
++				s.streamLock.RLock()
++				synStream, synOk := s.streams[sid]
++				s.streamLock.RUnlock()
++				if synOk && synStream.synTimer != nil {
++					synStream.synTimer.Stop()
++					synStream.synTimer = nil
+ 				}
+-				s.synDoneLock.Unlock()
+ 				if hdr.Length() > 0 {
+ 					buffer := buf.Get(int(hdr.Length()))
+ 					if _, err := io.ReadFull(s.conn, buffer); err != nil {
+diff --git a/session/stream.go b/session/stream.go
+index a962374..2282140 100644
+--- a/session/stream.go
++++ b/session/stream.go
+@@ -25,6 +25,11 @@ type Stream struct {
+ 	dieErr  error
+ 
+ 	reportOnce sync.Once
++
++	// synTimer is the per-stream SYNACK timeout (client only, sid >= 2).
++	// Fires if the server does not acknowledge the stream within the deadline.
++	// Only closes this stream; may also close session if no SYNACK received.
++	synTimer *time.Timer
+ }
+ 
+ // newStream initiates a Stream struct
+@@ -69,6 +74,9 @@ func (s *Stream) Close() error {
+ func (s *Stream) closeLocally() {
+ 	var once bool
+ 	s.dieOnce.Do(func() {
++		if s.synTimer != nil {
++			s.synTimer.Stop()
++		}
+ 		s.dieErr = net.ErrClosed
+ 		s.pipeR.Close()
+ 		once = true
+@@ -84,6 +92,9 @@ func (s *Stream) closeLocally() {
+ func (s *Stream) closeWithError(err error) error {
+ 	var once bool
+ 	s.dieOnce.Do(func() {
++		if s.synTimer != nil {
++			s.synTimer.Stop()
++		}
+ 		s.dieErr = err
+ 		s.pipeR.Close()
+ 		once = true
