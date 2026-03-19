@@ -1,0 +1,49 @@
+diff --git a/session/session.go b/session/session.go
+index 893cc72..79fca78 100644
+--- a/session/session.go
++++ b/session/session.go
+@@ -377,9 +377,11 @@ func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
+ 	binary.BigEndian.PutUint32(buffer.Extend(4), sid)
+ 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+ 	buffer.Write(data)
+-	_, err := s.writeConn(buffer.Bytes())
++
++	_, err := s.writeConn(buffer.Bytes(), time.Second*5)
+ 	buffer.Release()
+ 	if err != nil {
++		s.Close()
+ 		return 0, err
+ 	}
+ 
+@@ -395,24 +397,25 @@ func (s *Session) writeControlFrame(frame frame) (int, error) {
+ 	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+ 	buffer.Write(frame.data)
+ 
+-	s.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+-
+-	_, err := s.writeConn(buffer.Bytes())
++	_, err := s.writeConn(buffer.Bytes(), time.Second*5)
+ 	buffer.Release()
+ 	if err != nil {
+ 		s.Close()
+ 		return 0, err
+ 	}
+ 
+-	s.conn.SetWriteDeadline(time.Time{})
+-
+ 	return dataLen, nil
+ }
+ 
+-func (s *Session) writeConn(b []byte) (n int, err error) {
++func (s *Session) writeConn(b []byte, deadline time.Duration) (n int, err error) {
+ 	s.connLock.Lock()
+ 	defer s.connLock.Unlock()
+ 
++	if deadline > 0 {
++		s.conn.SetWriteDeadline(time.Now().Add(deadline))
++		defer s.conn.SetWriteDeadline(time.Time{})
++	}
++
+ 	if s.buffering {
+ 		s.buffer = slices.Concat(s.buffer, b)
+ 		return len(b), nil
