@@ -1,0 +1,70 @@
+diff -ruN '--exclude=.git' a/session/frame.go b/session/frame.go
+--- a/session/frame.go	2026-03-16 04:28:35.015156764 +0000
++++ b/session/frame.go	2026-03-16 04:28:35.128168502 +0000
+@@ -21,6 +21,7 @@
+ 
+ const (
+ 	headerOverHeadSize = 1 + 4 + 2
++	maxFrameDataLen    = 0xFFFF // math.MaxUint16 — max payload per frame
+ )
+ 
+ // frame defines a packet from or to be multiplexed into a single connection
+diff -ruN '--exclude=.git' a/session/session.go b/session/session.go
+--- a/session/session.go	2026-03-16 04:28:35.014156661 +0000
++++ b/session/session.go	2026-03-16 04:28:35.169172761 +0000
+@@ -380,26 +380,42 @@
+ }
+ 
+ func (s *Session) writeDataFrame(sid uint32, data []byte) (int, error) {
+-	dataLen := len(data)
++	totalLen := len(data)
+ 
+-	buffer := buf.NewSize(dataLen + headerOverHeadSize)
+-	buffer.WriteByte(cmdPSH)
+-	binary.BigEndian.PutUint32(buffer.Extend(4), sid)
+-	binary.BigEndian.PutUint16(buffer.Extend(2), uint16(dataLen))
+-	buffer.Write(data)
+-
+-	_, err := s.writeConn(buffer.Bytes(), time.Second*5)
+-	buffer.Release()
+-	if err != nil {
+-		s.Close()
+-		return 0, err
++	// Chunk oversized payloads to prevent uint16 overflow truncation.
++	// The receiver reassembles per-stream via pipe, so multiple PSH
++	// frames are transparent.
++	for len(data) > 0 {
++		chunk := data
++		if len(chunk) > maxFrameDataLen {
++			chunk = chunk[:maxFrameDataLen]
++		}
++		chunkLen := len(chunk)
++
++		buffer := buf.NewSize(chunkLen + headerOverHeadSize)
++		buffer.WriteByte(cmdPSH)
++		binary.BigEndian.PutUint32(buffer.Extend(4), sid)
++		binary.BigEndian.PutUint16(buffer.Extend(2), uint16(chunkLen))
++		buffer.Write(chunk)
++
++		_, err := s.writeConn(buffer.Bytes(), time.Second*5)
++		buffer.Release()
++		if err != nil {
++			s.Close()
++			return 0, err
++		}
++
++		data = data[chunkLen:]
+ 	}
+ 
+-	return dataLen, nil
++	return totalLen, nil
+ }
+ 
+ func (s *Session) writeControlFrame(frame frame) (int, error) {
+ 	dataLen := len(frame.data)
++	if dataLen > maxFrameDataLen {
++		return 0, fmt.Errorf("control frame data too large: %d > %d", dataLen, maxFrameDataLen)
++	}
+ 
+ 	buffer := buf.NewSize(dataLen + headerOverHeadSize)
+ 	buffer.WriteByte(frame.cmd)
