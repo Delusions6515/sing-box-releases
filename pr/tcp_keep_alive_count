@@ -1,0 +1,164 @@
+diff --git a/common/dialer/default.go b/common/dialer/default.go
+index 6b2379f..6c6ead3 100644
+--- a/common/dialer/default.go
++++ b/common/dialer/default.go
+@@ -158,10 +158,15 @@ func NewDefault(ctx context.Context, options option.DialerOptions) (*DefaultDial
+ 		if keepInterval == 0 {
+ 			keepInterval = C.TCPKeepAliveInterval
+ 		}
++		keepCount := options.TCPKeepAliveCount
++		if keepCount < 0 {
++			keepCount = 0
++		}
+ 		dialer.KeepAliveConfig = net.KeepAliveConfig{
+ 			Enable:   true,
+ 			Idle:     keepIdle,
+ 			Interval: keepInterval,
++			Count:    keepCount,
+ 		}
+ 	}
+ 	var udpFragment bool
+diff --git a/common/listener/listener_tcp.go b/common/listener/listener_tcp.go
+index 899d444..2326fcb 100644
+--- a/common/listener/listener_tcp.go
++++ b/common/listener/listener_tcp.go
+@@ -46,10 +46,15 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
+ 		if keepInterval == 0 {
+ 			keepInterval = C.TCPKeepAliveInterval
+ 		}
++		keepCount := l.listenOptions.TCPKeepAliveCount
++		if keepCount < 0 {
++			keepCount = 0
++		}
+ 		listenConfig.KeepAliveConfig = net.KeepAliveConfig{
+ 			Enable:   true,
+ 			Idle:     keepIdle,
+ 			Interval: keepInterval,
++			Count:    keepCount,
+ 		}
+ 	}
+ 	if l.listenOptions.TCPMultiPath {
+diff --git a/docs/configuration/shared/dial.md b/docs/configuration/shared/dial.md
+index 306952f..ea21021 100644
+--- a/docs/configuration/shared/dial.md
++++ b/docs/configuration/shared/dial.md
+@@ -40,6 +40,7 @@ icon: material/new-box
+   "disable_tcp_keep_alive": false,
+   "tcp_keep_alive": "",
+   "tcp_keep_alive_interval": "",
++  "tcp_keep_alive_count": 0,
+   "udp_fragment": false,
+ 
+   "domain_resolver": "", // or {}
+@@ -159,6 +160,12 @@ TCP keep alive interval.
+ 
+ `75s` will be used by default.
+ 
++#### tcp_keep_alive_count
++
++TCP keep alive probe count.
++
++The system default will be used by default.
++
+ #### udp_fragment
+ 
+ Enable UDP fragmentation.
+diff --git a/docs/configuration/shared/dial.zh.md b/docs/configuration/shared/dial.zh.md
+index 4930935..880fb6f 100644
+--- a/docs/configuration/shared/dial.zh.md
++++ b/docs/configuration/shared/dial.zh.md
+@@ -40,6 +40,7 @@ icon: material/new-box
+   "disable_tcp_keep_alive": false,
+   "tcp_keep_alive": "",
+   "tcp_keep_alive_interval": "",
++  "tcp_keep_alive_count": 0,
+   "udp_fragment": false,
+ 
+   "domain_resolver": "", // 或 {}
+@@ -157,6 +158,12 @@ TCP keep alive 间隔。
+ 
+ 默认使用 `75s`。
+ 
++#### tcp_keep_alive_count
++
++TCP keep alive 探测次数。
++
++默认使用系统默认值。
++
+ #### udp_fragment
+ 
+ 启用 UDP 分段。
+diff --git a/docs/configuration/shared/listen.md b/docs/configuration/shared/listen.md
+index 5532556..3f12f31 100644
+--- a/docs/configuration/shared/listen.md
++++ b/docs/configuration/shared/listen.md
+@@ -37,6 +37,7 @@ icon: material/new-box
+   "disable_tcp_keep_alive": false,
+   "tcp_keep_alive": "",
+   "tcp_keep_alive_interval": "",
++  "tcp_keep_alive_count": 0,
+   "udp_fragment": false,
+   "udp_timeout": "",
+   "detour": "",
+@@ -131,6 +132,12 @@ TCP keep alive interval.
+ 
+ `75s` will be used by default.
+ 
++#### tcp_keep_alive_count
++
++TCP keep alive probe count.
++
++The system default will be used by default.
++
+ #### udp_fragment
+ 
+ Enable UDP fragmentation.
+diff --git a/docs/configuration/shared/listen.zh.md b/docs/configuration/shared/listen.zh.md
+index 905cea3..1cc5b60 100644
+--- a/docs/configuration/shared/listen.zh.md
++++ b/docs/configuration/shared/listen.zh.md
+@@ -37,6 +37,7 @@ icon: material/new-box
+   "disable_tcp_keep_alive": false,
+   "tcp_keep_alive": "",
+   "tcp_keep_alive_interval": "",
++  "tcp_keep_alive_count": 0,
+   "udp_fragment": false,
+   "udp_timeout": "",
+   "detour": "",
+@@ -131,6 +132,12 @@ TCP keep alive 间隔。
+ 
+ 默认使用 `75s`。
+ 
++#### tcp_keep_alive_count
++
++TCP keep alive 探测次数。
++
++默认使用系统默认值。
++
+ #### udp_fragment
+ 
+ 启用 UDP 分段。
+diff --git a/option/inbound.go b/option/inbound.go
+index 4fb6081..8d9d489 100644
+--- a/option/inbound.go
++++ b/option/inbound.go
+@@ -67,6 +67,7 @@ type ListenOptions struct {
+ 	DisableTCPKeepAlive  bool               `json:"disable_tcp_keep_alive,omitempty"`
+ 	TCPKeepAlive         badoption.Duration `json:"tcp_keep_alive,omitempty"`
+ 	TCPKeepAliveInterval badoption.Duration `json:"tcp_keep_alive_interval,omitempty"`
++	TCPKeepAliveCount    int               `json:"tcp_keep_alive_count,omitempty"`
+ 	TCPFastOpen          bool               `json:"tcp_fast_open,omitempty"`
+ 	TCPMultiPath         bool               `json:"tcp_multi_path,omitempty"`
+ 	UDPFragment          *bool              `json:"udp_fragment,omitempty"`
+diff --git a/option/outbound.go b/option/outbound.go
+index cb388c4..9f9045c 100644
+--- a/option/outbound.go
++++ b/option/outbound.go
+@@ -80,6 +80,7 @@ type DialerOptions struct {
+ 	DisableTCPKeepAlive  bool                              `json:"disable_tcp_keep_alive,omitempty"`
+ 	TCPKeepAlive         badoption.Duration                `json:"tcp_keep_alive,omitempty"`
+ 	TCPKeepAliveInterval badoption.Duration                `json:"tcp_keep_alive_interval,omitempty"`
++	TCPKeepAliveCount    int                               `json:"tcp_keep_alive_count,omitempty"`
+ 	UDPFragment          *bool                             `json:"udp_fragment,omitempty"`
+ 	UDPFragmentDefault   bool                              `json:"-"`
+ 	DomainResolver       *DomainResolveOptions             `json:"domain_resolver,omitempty"`
