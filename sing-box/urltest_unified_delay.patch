@@ -1,0 +1,68 @@
+diff --git a/box.go b/box.go
+index 1b79f9b423..d1db61dcd6 100644
+--- a/box.go
++++ b/box.go
+@@ -169,6 +169,8 @@ func New(options Options) (*Box, error) {
+ 		return nil, E.Cause(err, "create log factory")
+ 	}
+ 
++	C.URLTestUnifiedDelay = experimentalOptions.URLTestUnifiedDelay
++
+ 	var internalServices []adapter.LifecycleService
+ 	certificateOptions := common.PtrValueOrDefault(options.Certificate)
+ 	if C.IsAndroid || certificateOptions.Store != "" && certificateOptions.Store != C.CertificateStoreSystem ||
+diff --git a/common/urltest/urltest.go b/common/urltest/urltest.go
+index 29d790e4d0..856449a245 100644
+--- a/common/urltest/urltest.go
++++ b/common/urltest/urltest.go
+@@ -125,6 +125,17 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
+ 		return
+ 	}
+ 	resp.Body.Close()
++	if C.URLTestUnifiedDelay {
++		second := time.Now()
++		var ignoredErr error
++		var secondResp *http.Response
++		secondResp, ignoredErr = client.Do(req.WithContext(ctx))
++		if ignoredErr == nil {
++			resp = secondResp
++			resp.Body.Close()
++			start = second
++		}
++	}
+ 	t = uint16(time.Since(start) / time.Millisecond)
+ 	return
+ }
+diff --git a/constant/network.go b/constant/network.go
+index 88a1dd815f..ce0b7f6917 100644
+--- a/constant/network.go
++++ b/constant/network.go
+@@ -5,6 +5,8 @@ import (
+ 	F "github.com/sagernet/sing/common/format"
+ )
+ 
++var URLTestUnifiedDelay = false
++
+ type InterfaceType uint8
+ 
+ const (
+diff --git a/option/experimental.go b/option/experimental.go
+index 518568b909..7fcc6b99d2 100644
+--- a/option/experimental.go
++++ b/option/experimental.go
+@@ -3,10 +3,11 @@ package option
+ import "github.com/sagernet/sing/common/json/badoption"
+ 
+ type ExperimentalOptions struct {
+-	CacheFile *CacheFileOptions `json:"cache_file,omitempty"`
+-	ClashAPI  *ClashAPIOptions  `json:"clash_api,omitempty"`
+-	V2RayAPI  *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
+-	Debug     *DebugOptions     `json:"debug,omitempty"`
++	CacheFile           *CacheFileOptions `json:"cache_file,omitempty"`
++	ClashAPI            *ClashAPIOptions  `json:"clash_api,omitempty"`
++	V2RayAPI            *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
++	Debug               *DebugOptions     `json:"debug,omitempty"`
++	URLTestUnifiedDelay bool              `json:"urltest_unified_delay,omitempty"`
+ }
+ 
+ type CacheFileOptions struct {
