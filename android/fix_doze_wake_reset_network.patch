@@ -1,0 +1,12 @@
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index 1761e65..5a1e035 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -269,6 +269,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+             commandServer.pause()
+         } else {
+             commandServer.wake()
++            commandServer.resetNetwork()
+         }
+     }
+ 
