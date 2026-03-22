@@ -301,6 +301,12 @@ jobs:
           cd sing-box
           git tag v${{ github.event.inputs.version }} -f
 
+      - name: Read version code from source
+        run: |
+          VERSION_CODE=$(grep '^VERSION_CODE=' sing-box-for-android/version.properties | cut -d'=' -f2)
+          echo "Read VERSION_CODE from source: $VERSION_CODE"
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+
       - name: Apply sing-box patches
         run: |
           cd sing-box
