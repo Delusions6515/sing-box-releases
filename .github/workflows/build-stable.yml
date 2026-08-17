@@ -49,7 +49,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ inputs.commit_hash != '' && inputs.commit_hash || format('v{0}', inputs.version) }}
           path: sing-box
           fetch-depth: 1
@@ -320,7 +320,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ needs.resolve_source.outputs.source_sha }}
           path: sing-box
           fetch-depth: 1
@@ -606,7 +606,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ needs.resolve_source.outputs.source_sha }}
           path: sing-box
           fetch-depth: 1
@@ -677,7 +677,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ needs.resolve_source.outputs.source_sha }}
           path: sing-box
           fetch-depth: 1
@@ -815,7 +815,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ needs.resolve_source.outputs.source_sha }}
           path: sing-box
           fetch-depth: 1
@@ -960,7 +960,7 @@ jobs:
       - name: Checkout sing-box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ needs.resolve_source.outputs.source_sha }}
           path: sing-box
           fetch-depth: 1
