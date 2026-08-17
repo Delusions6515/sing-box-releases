@@ -55,7 +55,7 @@ jobs:
           case "$CHANNEL" in
             testing)
               workflow='.github/workflows/build-testing.yml'
-              target_branch='reF1nd-testing'
+              target_branch='testing-Delusions6515'
               build_info_file='testing-build-info.json'
               ;;
             stable)
@@ -241,7 +241,7 @@ jobs:
           SING_BOX_REPOSITORY_TOKEN: ${{ secrets.SING_BOX_REPOSITORY_TOKEN }}
         run: |
           if [[ -z "$SING_BOX_REPOSITORY_TOKEN" ]]; then
-            echo "SING_BOX_REPOSITORY_TOKEN is required to update reF1nd/sing-box" >&2
+            echo "SING_BOX_REPOSITORY_TOKEN is required to update Delusions6515/sing-box" >&2
             exit 1
           fi
 
@@ -249,7 +249,7 @@ jobs:
         if: inputs.update_sing_box
         uses: actions/checkout@v6
         with:
-          repository: reF1nd/sing-box
+          repository: Delusions6515/sing-box
           ref: ${{ steps.manifest.outputs.source_sha }}
           token: ${{ secrets.SING_BOX_REPOSITORY_TOKEN }}
           path: sing-box
@@ -309,7 +309,7 @@ jobs:
             echo "|---|---|"
             echo "| Channel | \`${CHANNEL}\` |"
             echo "| Version | \`${VERSION}\` |"
-            echo "| sing-box Commit | [\`${SOURCE_SHA}\`](https://github.com/reF1nd/sing-box/commit/${SOURCE_SHA}) |"
+            echo "| sing-box Commit | [\`${SOURCE_SHA}\`](https://github.com/Delusions6515/sing-box/commit/${SOURCE_SHA}) |"
             echo "| Built At | ${BUILT_AT} |"
             echo "| Published At | ${published_at} |"
             echo "| Build Run ID | [${BUILD_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${BUILD_RUN_ID}) |"
