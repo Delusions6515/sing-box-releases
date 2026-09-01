@@ -381,8 +381,10 @@ jobs:
           mv release_files/sing-box-*-windows-* release_files/windows/ 2>/dev/null || true
           mv release_files/sing-box-* release_files/others/ 2>/dev/null || true
 
+      # telegram posting disabled
       - name: Post SFA to channel
-        if: steps.manifest.outputs.build_android_gui == 'true'
+        if: false
+        # if: steps.manifest.outputs.build_android_gui == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -396,7 +398,8 @@ jobs:
           method: sendFile
 
       - name: Post SFW to channel
-        if: inputs.channel != 'oldstable' && steps.manifest.outputs.build_windows_gui == 'true'
+        if: false
+        # if: inputs.channel != 'oldstable' && steps.manifest.outputs.build_windows_gui == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -410,7 +413,8 @@ jobs:
           method: sendFile
 
       - name: Post SFL to channel
-        if: inputs.channel != 'oldstable' && steps.manifest.outputs.build_linux_gui == 'true'
+        if: false
+        # if: inputs.channel != 'oldstable' && steps.manifest.outputs.build_linux_gui == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -424,7 +428,8 @@ jobs:
           method: sendFile
 
       - name: Post sing-box Android CLI to channel
-        if: steps.manifest.outputs.build_cli == 'true'
+        if: false
+        # if: steps.manifest.outputs.build_cli == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -438,7 +443,8 @@ jobs:
           method: sendFile
 
       - name: Post sing-box Darwin CLI to channel
-        if: steps.manifest.outputs.build_cli == 'true'
+        if: false
+        # if: steps.manifest.outputs.build_cli == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -452,7 +458,8 @@ jobs:
           method: sendFile
 
       - name: Post sing-box Windows CLI to channel
-        if: steps.manifest.outputs.build_cli == 'true'
+        if: false
+        # if: steps.manifest.outputs.build_cli == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
@@ -466,7 +473,8 @@ jobs:
           method: sendFile
 
       - name: Post sing-box Linux CLI to channel
-        if: steps.manifest.outputs.build_cli == 'true'
+        if: false
+        # if: steps.manifest.outputs.build_cli == 'true'
         uses: xireiki/channel-post@v2
         with:
           chat_id: ${{ secrets.CHAT_ID }}
