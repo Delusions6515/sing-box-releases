@@ -443,6 +443,7 @@ jobs:
           else
             TAGS=$(cat sing-box/release/DEFAULT_BUILD_TAGS_OTHERS)
           fi
+          TAGS="${TAGS},with_xhttp"
           if [[ "${{ matrix.naive }}" == "true" && "${TAGS}" != *with_naive_outbound* ]]; then
             TAGS="${TAGS},with_naive_outbound"
           fi
